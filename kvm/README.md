@@ -2,7 +2,7 @@
 
 # TP : Virtualisation avec KVM, QEMU et libvirt
 
-> **Environnement :** VM Ubuntu 24.04  avec virtualisation imbriquée, ou PC Linux  
+> **Environnement :** Ubuntu 24.04 ou 26.04 LTS Desktop, dans une VM (VirtualBox ou VMware) avec virtualisation imbriquée, ou sur un PC Linux  
 > **Objectifs :**
 > 1. Comprendre le rôle de chaque brique (KVM, QEMU, libvirt, virsh, virt-manager)
 > 2. Installer et vérifier un hôte KVM
@@ -13,7 +13,7 @@
 
 ## Avant de commencer :  KVM 
 
-**KVM** (*Kernel-based Virtual Machine*) est un module du noyau Linux (intégré depuis le noyau 2.6.20). Il s'appuie sur les extensions matérielles du processeur (Intel VT-x ou AMD-V) et transforme le noyau Linux en hyperviseur : on le classe généralement parmi les hyperviseurs de **type 1**, puisque c'est le noyau lui-même qui joue ce rôle _(souvent qualifié d'hybride, mais considéré comme type 1 en production car le noyau gère directement le matériel_).
+**KVM** (*Kernel-based Virtual Machine*) est un module du noyau Linux (intégré depuis le noyau 2.6.20). Il s'appuie sur les extensions matérielles du processeur (Intel VT-x ou AMD-V) et transforme le noyau Linux en hyperviseur : on le classe généralement parmi les hyperviseurs de **type 1**, puisque c'est le noyau lui-même qui joue ce rôle _(souvent qualifié d'hybride, mais considéré comme type 1 en production car le noyau gère directement le matériel)_.
 
 KVM ne fait pas tout seul tourner une VM : il fournit l'accélération CPU et mémoire. C'est **QEMU** qui émule le reste du matériel (disque, carte réseau, écran…). Gérer QEMU à la main reste fastidieux, d'où **libvirt** : une bibliothèque et un démon (`libvirtd`) qui offrent une interface unique pour plusieurs technologies (KVM/QEMU, Xen, LXC…). Les outils `virsh`, `virt-install` et `virt-manager` passent tous par libvirt.
 
@@ -39,8 +39,10 @@ flowchart TB
 | virt-install | Création de VM en CLI | `virtinst` |
 | virt-manager | Interface graphique | `virt-manager` |
 | qemu-img | Gestion des images disque | `qemu-utils` |
+
 > [!NOTE]
 > **À propos des performances : VirtIO**
+>
 > Émuler un vrai matériel (contrôleur SATA, carte réseau Intel…) coûte cher : QEMU doit imiter chaque registre du composant réel. Pour éviter ce coût, KVM/QEMU propose des périphériques **paravirtualisés VirtIO** : le système invité sait qu'il est virtualisé et utilise une interface simplifiée, conçue pour la virtualisation.
 > `virt-install` choisit VirtIO automatiquement lorsque le système invité le supporte (d'où l'importance de l'option `--osinfo`, section 5). Conséquence visible dans vos VM Linux :
 > - le disque apparaît sous le nom **`/dev/vda`** (*virtio disk a*) au lieu de `/dev/sda` ;
@@ -56,11 +58,24 @@ flowchart TB
 
 ### Configuration recommandée
 
-| | Hôte KVM (PC Linux ou VM Ubuntu) | PC physique (si l'hôte KVM est une VM VMware) |
+| | Hôte KVM (PC Linux ou VM Ubuntu) | PC physique (si l'hôte KVM est une VM) |
 |---|---|---|
 | CPU | 2 cœurs min., 4 recommandés | VT-x / AMD-V activé dans le BIOS |
 | RAM | 4 Go min., 6 Go recommandés | 8 Go min. |
 | Disque libre | 10 Go (15–20 Go pour être à l'aise) | taille de la VM Ubuntu + 10 Go |
+
+> [!IMPORTANT]
+> **Vous travaillez dans une VM (VirtualBox ou VMware) ?** Il faut activer la **virtualisation imbriquée**, sinon KVM ne fonctionnera pas dans la VM. La VM doit être **éteinte** (pas « Sauvegarder l'état »).
+>
+> **VirtualBox :** *Configuration* → *Système* → onglet *Processeur* → cocher **« Activer VT-x/AMD-V imbriqué »** et attribuer **2 à 4 processeurs** (jamais tous ceux du PC). Si la case est grisée, depuis un terminal du PC (sous Windows : `cmd`, dans `C:\Program Files\Oracle\VirtualBox`) :
+> ```
+> VBoxManage modifyvm "NomDeLaVM" --nested-hw-virt on
+> ```
+>
+> **VMware :** *Settings* → *Processors* → cocher **« Virtualize Intel VT-x/EPT or AMD-V/RVI »**.
+
+> [!WARNING]
+> **PC sous Windows :** si Hyper-V, WSL2 ou la « sécurité basée sur la virtualisation » sont actifs, VirtualBox et VMware ne peuvent généralement pas fournir la virtualisation imbriquée (VirtualBox affiche alors une **tortue verte** en bas de la fenêtre de la VM et fonctionne en mode très lent). Il faut désactiver ces fonctionnalités Windows, puis redémarrer le PC.
 
 - Vérifiez la présence des extensions de virtualisation :
 
@@ -70,10 +85,15 @@ grep -Ec '(vmx|svm)' /proc/cpuinfo
 
 Le résultat est le nombre de processeurs (cœurs logiques) qui disposent de l'extension. **0** signifie que la virtualisation matérielle n'est pas disponible : vérifier le BIOS du PC, ou l'option de virtualisation imbriquée de la VM.
 
+> [!TIP]
+> **Le résultat est 0 dans une VM VirtualBox ?**
+> 1. Éteignez complètement la VM, puis vérifiez que l'option est bien active : `VBoxManage showvminfo "NomDeLaVM"` doit afficher `Nested VT-x/AMD-V: enabled`.
+> 2. Une **tortue verte** en bas de la fenêtre de la VM signifie que VirtualBox fonctionne au-dessus de Hyper-V : voir l'avertissement ci-dessus.
+
 - Identifiez le type d'extension :
 
 ```bash
-grep -Eo '(vmx|svm)' /proc/cpuinfo 
+grep -Eo '(vmx|svm)' /proc/cpuinfo | sort -u
 ```
 
 - `vmx` : processeur **Intel** (VT-x)
@@ -275,10 +295,10 @@ virt-install --osinfo list | grep -i alpine
 
 ### 5.3 Lancer la création
 
-(Remplacez `alpinelinux3.19` par une valeur trouvée à l'étape 5.2. En cas de doute : `--osinfo linux2022`.)
+Remplacez `alpinelinux3.21` par la valeur la plus récente trouvée à l'étape 5.2 (en cas de doute : `--osinfo linux2022`).
 
 > [!NOTE]
-> Si la version exacte de votre ISO n'apparaît pas dans `virt-install --osinfo list`, choisissez la version la plus récente proposée.
+> Si la version exacte de votre ISO n'apparaît pas dans `virt-install --osinfo list`, choisissez la version la plus récente proposée : les réglages matériels (VirtIO…) sont identiques.
 
 ```bash
 virt-install \
@@ -288,11 +308,11 @@ virt-install \
   --cpu host-passthrough \
   --disk size=4,format=qcow2 \
   --cdrom /var/lib/libvirt/boot/alpine.iso \
-  --osinfo alpinelinux3.19 \
+  --osinfo alpinelinux3.21 \
   --network network=default \
-  --graphics spice
+  --graphics none \
+  --console pty,target_type=serial
 ```
-
 
 | Option | Rôle |
 |---|---|
@@ -304,17 +324,28 @@ virt-install \
 | `--cdrom` | Média d'installation |
 | `--osinfo` | Système invité (alias : `--os-variant`) |
 | `--network network=default` | Réseau NAT de libvirt (`bridge=br0` pour un pont) |
-| `--graphics` | Affichage de l'invité (`spice`, `vnc` ou `none`) |
+| `--graphics none` | Pas d'affichage graphique (sinon `spice` ou `vnc`) |
+| `--console pty,target_type=serial` | Console texte de la VM (port série), affichée dans le terminal |
 
-La console de la VM s'ouvre dans **virt-viewer**. Pour la re-ouvrir plus tard : `virt-viewer alpine1`, ou depuis virt-manager.
+La console de la VM s'affiche directement dans votre terminal :
+
+- pour la **quitter** sans arrêter la VM : **Ctrl + ]** ;
+- pour y **revenir** : `virsh console alpine1` (puis Entrée).
+
+> [!NOTE]
+> Une console série est plus légère et plus fiable qu'une fenêtre graphique, surtout en virtualisation imbriquée. Avec `--graphics spice`, la console s'ouvre dans **virt-viewer** (`virt-viewer alpine1`) ; pour libérer la souris capturée par la VM : **Ctrl + Alt**.
+
+> [!WARNING]
+> Lancez `virt-install` **une seule fois**. Si la commande échoue, supprimez la VM avant de recommencer : `virsh destroy alpine1`, puis `virsh undefine alpine1 --remove-all-storage`.
 
 ### 5.4 Installer Alpine
 
 Dans la console :
 
-1. Connectez-vous en `root` (pas de mot de passe).
-2. Lancez `setup-alpine` et répondez aux questions : clavier `fr`, réseau `eth0` en `dhcp`, mot de passe root, fuseau horaire, puis disque `vda` en mode `sys`.
-3. Une fois l'installation terminée : `reboot`. La VM redémarre sur son disque.
+1. À l'invite `boot:`, tapez `virt` puis Entrée. Le démarrage peut prendre une à deux minutes en virtualisation imbriquée.
+2. Connectez-vous en `root` (pas de mot de passe).
+3. Lancez `setup-alpine` et répondez aux questions : clavier `fr`, réseau `eth0` en `dhcp`, mot de passe root, fuseau horaire, puis disque `vda` en mode `sys`.
+4. Une fois l'installation terminée : `reboot`. La VM redémarre sur son disque ; connectez-vous en `root` avec le mot de passe choisi.
 
 ### 5.5 Vérifier la connectivité
 
@@ -411,20 +442,20 @@ virsh snapshot-list alpine1
 1. Exporter la configuration (VM éteinte) :
    ```bash
    virsh shutdown alpine1
-   virsh dumpxml alpine1 > /tmp/alpine2.xml
+   virsh dumpxml alpine1 > ~/alpine2.xml
    ```
 2. Copier le disque :
    ```bash
    sudo cp /var/lib/libvirt/images/alpine1.qcow2 /var/lib/libvirt/images/alpine2.qcow2
    ```
-3. Dans `/tmp/alpine2.xml` :
+3. Dans `~/alpine2.xml` :
    - changer `<name>` en `alpine2`
    - **supprimer** la ligne `<uuid>` (libvirt en générera une)
    - changer le chemin du disque (`<source file=...>`) vers `alpine2.qcow2`
    - **supprimer** la ligne `<mac address=.../>` (sinon conflit réseau avec alpine1)
 4. Enregistrer la VM :
    ```bash
-   virsh define /tmp/alpine2.xml
+   virsh define ~/alpine2.xml
    virsh start alpine2
    ```
 
@@ -457,6 +488,16 @@ Copier l'image dans le pool de stockage :
 sudo cp cirros-0.6.3-x86_64-disk.img /var/lib/libvirt/images/cirros1.qcow2
 ```
 
+Créer un petit disque de configuration au format **NoCloud** :
+
+```bash
+sudo apt install -y cloud-image-utils
+echo "instance-id: cirros1" > meta-data
+echo "#cloud-config" > user-data
+cloud-localds seed.iso user-data meta-data
+sudo cp seed.iso /var/lib/libvirt/boot/cirros1-seed.iso
+```
+
 Créer la VM :
 
 ```bash
@@ -464,9 +505,9 @@ virt-install --import \
   --name cirros1 \
   --memory 256 --vcpus 1 \
   --disk /var/lib/libvirt/images/cirros1.qcow2,format=qcow2 \
+  --disk /var/lib/libvirt/boot/cirros1-seed.iso,device=cdrom \
   --osinfo linux2022 \
   --network network=default \
-  --cloud-init \
   --graphics none \
   --console pty,target_type=serial
 ```
@@ -474,9 +515,9 @@ virt-install --import \
 Connexion : utilisateur `cirros`, mot de passe `gocubsgo`. Pour quitter la console : **Ctrl + ]**.
 
 > [!NOTE]
-> **Pourquoi `--cloud-init` ?** Au démarrage, une image cloud cherche sa configuration (nom d'hôte, clés SSH…) auprès d'un **service de métadonnées** (`169.254.169.254`), fourni par le cloud. Ce service n'existe pas ici : sans configuration locale, CirrOS ferait 20 tentatives avant d'afficher `login:`. L'option `--cloud-init` fournit cette configuration sur un petit disque local, ce qui évite l'attente.
+> **Pourquoi ce disque `seed.iso` ?** Au démarrage, une image cloud cherche sa configuration (nom d'hôte, clés SSH…) auprès d'une **source de données** : en général le **service de métadonnées** du cloud (`169.254.169.254`), absent ici. CirrOS (via son outil `cirros-init`, équivalent léger de **cloud-init**) cherche d'abord une source locale au format **NoCloud** : le disque `seed.iso`. Sans lui, il ferait 20 tentatives réseau avant d'afficher `login:`.
 
-**Question.**
+**Question 7.**
 a) Quel est le format de l'image téléchargée d'après `qemu-img info` ? Quelle est sa taille virtuelle et sa taille réelle ?
 b) Pourquoi n'a-t-on eu besoin ni de `--cdrom` ni d'installation ?
 c) Quel est le rôle du service de métadonnées dans un cloud ?
@@ -494,17 +535,29 @@ virsh undefine alpine3 --remove-all-storage       # supprime la VM ET son disque
 
 **virt-manager** fournit une interface graphique au-dessus de libvirt : création de VM, console, statistiques, snapshots, migration entre hôtes. Lancez `virt-manager` et retrouvez-y les VM créées en ligne de commande.
 
-**Question 7.** Les VM créées avec `virsh` apparaissent-elles dans virt-manager ? Qu'est-ce que cela montre sur le rôle de libvirt ?
+**Question 8.** Les VM créées avec `virsh` apparaissent-elles dans virt-manager ? Qu'est-ce que cela montre sur le rôle de libvirt ?
 
-**QEMU sans libvirt.** On peut lancer QEMU directement. La VM n'est alors pas connue de libvirt :
+**QEMU sans libvirt.** On peut lancer QEMU directement. La VM n'est alors pas connue de libvirt. Créez un disque de test personnel, puis démarrez QEMU sur l'ISO Alpine :
 
 ```bash
-qemu-system-x86_64 -enable-kvm -m 1024 \
-  -drive file=/var/lib/libvirt/images/test.qcow2,format=qcow2 \
-  -cdrom /var/lib/libvirt/boot/alpine.iso -boot d
+qemu-img create -f qcow2 ~/qemu-test.qcow2 2G
+
+qemu-system-x86_64 -enable-kvm -m 512 \
+  -drive file=$HOME/qemu-test.qcow2,format=qcow2 \
+  -cdrom /var/lib/libvirt/boot/alpine.iso -boot d \
+  -nographic
 ```
 
-**Question 8.** Lancez la commande ci-dessus puis `virsh list --all`. La VM apparaît-elle ? Quels avantages libvirt apporte-t-il par rapport à QEMU seul ?
+À l'invite `boot:`, tapez `virt`. Pour quitter QEMU : **Ctrl + A**, puis **X**.
+
+Dans un **second terminal**, pendant que la VM tourne :
+
+```bash
+virsh list --all
+ps aux | grep qemu-system
+```
+
+**Question 9.** La VM lancée avec QEMU apparaît-elle dans `virsh list --all` ? Quels avantages libvirt apporte-t-il par rapport à QEMU seul ?
 
 ---
 
