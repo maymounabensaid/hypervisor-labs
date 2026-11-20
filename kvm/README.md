@@ -74,8 +74,6 @@ flowchart TB
 >
 > **VMware :** *Settings* → *Processors* → cocher **« Virtualize Intel VT-x/EPT or AMD-V/RVI »**.
 
-> [!WARNING]
-> **PC sous Windows :** si Hyper-V, WSL2 ou la « sécurité basée sur la virtualisation » sont actifs, VirtualBox et VMware ne peuvent généralement pas fournir la virtualisation imbriquée (VirtualBox affiche alors une **tortue verte** en bas de la fenêtre de la VM et fonctionne en mode très lent). Il faut désactiver ces fonctionnalités Windows, puis redémarrer le PC.
 
 - Vérifiez la présence des extensions de virtualisation :
 
@@ -106,8 +104,6 @@ find /lib/modules/$(uname -r) -iname "*kvm*"
 ```
 
 Parmi les résultats, seuls trois modules nous intéressent : `kvm` (le cœur de KVM), `kvm-intel` et `kvm-amd` (la partie propre au fabricant du processeur). L'extension `.zst` indique que le module est compressé.
-
-**Question 1.** La commande `find` liste à la fois `kvm-intel` et `kvm-amd`. Lequel des deux votre machine utilisera-t-elle ? Justifiez avec la sortie de la commande `grep -Eo`.
 
 
 ---
@@ -271,7 +267,6 @@ du -h  /var/lib/libvirt/images/test.qcow2
 **Question 3.** Comparez la *virtual size* donnée par `qemu-img info` et la place réellement occupée (`du -h`). Que pouvez-vous en déduire sur le format qcow2 ?
 
 ---
-
 ## 5. Créer une VM avec virt-install
 
 Nous installons **Alpine Linux** (édition *virt*) : une distribution très légère, dont l'ISO se télécharge et s'installe en quelques minutes.
