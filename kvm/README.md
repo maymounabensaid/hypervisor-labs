@@ -1,17 +1,16 @@
 
-
 # TP : Virtualisation avec KVM, QEMU et libvirt
 
-> **Environnement :** Ubuntu 24.04 ou 26.04 LTS Desktop, dans une VM (VirtualBox ou VMware) avec virtualisation imbriquée, ou sur un PC Linux  
+> **Environnement :** Instance Cloud **AWS EC2 (`r8i.large`, Ubuntu 24.04 LTS Server)** avec virtualisation imbriquée activée, administrée à distance via **SSH** (MobaXterm sur Windows, Terminal + XQuartz sur macOS, ou Terminal SSH sur Linux).  
 > **Objectifs :**
 > 1. Comprendre le rôle de chaque brique (KVM, QEMU, libvirt, virsh, virt-manager)
-> 2. Installer et vérifier un hôte KVM
+> 2. Installer et vérifier un hôte KVM sur un serveur cloud
 > 3. Créer, piloter, sauvegarder et cloner une VM en ligne de commande
-> 4. Manipuler les images disque (qcow2), les réseaux et les snapshots
+> 4. Manipuler les images disque (`qcow2`), les réseaux et les snapshots
 
 ---
 
-## Avant de commencer :  KVM 
+## Avant de commencer : KVM et architecture du TP
 
 **KVM** (*Kernel-based Virtual Machine*) est un module du noyau Linux (intégré depuis le noyau 2.6.20). Il s'appuie sur les extensions matérielles du processeur (Intel VT-x ou AMD-V) et transforme le noyau Linux en hyperviseur : on le classe généralement parmi les hyperviseurs de **type 1**, puisque c'est le noyau lui-même qui joue ce rôle _(souvent qualifié d'hybride, mais considéré comme type 1 en production car le noyau gère directement le matériel)_.
 
@@ -19,15 +18,16 @@ KVM ne fait pas tout seul tourner une VM : il fournit l'accélération CPU et m�
 
 ```mermaid
 flowchart TB
-    subgraph Outils["Outils d'administration"]
-        A[virt-manager<br/>graphique]
+    subgraph Outils["Outils d'administration (sur l'instance EC2)"]
+        A[virt-manager<br/>graphique via X11]
         B[virsh<br/>ligne de commande]
         C[virt-install]
     end
     Outils --> D[libvirtd<br/>+ fichiers XML des VM]
     D --> E[QEMU<br/>émulation des périphériques]
     E --> F[KVM<br/>module noyau /dev/kvm]
-    F --> G[CPU avec Intel VT-x / AMD-V]
+    F --> G[vCPU EC2 r8i avec Intel VT-x imbriqué]
+
 ```
 
 | Brique | Rôle | Paquet (Ubuntu/Debian) |
@@ -52,41 +52,28 @@ flowchart TB
 
 
 ---
-
 ## 1. Prérequis : le processeur supporte-t-il la virtualisation ?
 
+> [!NOTE]
+> Ce TP suppose que votre instance EC2 est **déjà lancée avec la virtualisation imbriquée activée** et que vous êtes **connecté en SSH**. Si ce n'est pas le cas, suivez d'abord le [guide de préparation de l'instance EC2](guide-ec2.md).
 
-### Configuration recommandée
+### Configuration de l'hôte KVM (Instance AWS EC2 `r8i.large`)
 
-| | Hôte KVM (PC Linux ou VM Ubuntu) | PC physique (si l'hôte KVM est une VM) |
-|---|---|---|
-| CPU | 2 cœurs min., 4 recommandés | VT-x / AMD-V activé dans le BIOS |
-| RAM | 4 Go min., 6 Go recommandés | 8 Go min. |
-| Disque libre | 10 Go (15–20 Go pour être à l'aise) | taille de la VM Ubuntu + 10 Go |
+| Ressource      | Spécification utilisée             | Rôle                                                                |
+| -------------- | ---------------------------------- | ------------------------------------------------------------------- |
+| **vCPU**       | 2 cœurs (avec Intel VT-x imbriqué) | Exécution des VM invitées avec accélération matérielle              |
+| **RAM**        | 16 Go                              | Hébergement de l'OS hôte Ubuntu et des VM (Alpine, CirrOS)          |
+| **Disque EBS** | 50 Go                              | Stockage du système, des images ISO et des disques virtuels `qcow2` |
 
-> [!IMPORTANT]
-> **Vous travaillez dans une VM (VirtualBox ou VMware) ?** Il faut activer la **virtualisation imbriquée**, sinon KVM ne fonctionnera pas dans la VM. La VM doit être **éteinte** (pas « Sauvegarder l'état »).
->
-> **VirtualBox :** *Configuration* → *Système* → onglet *Processeur* → cocher **« Activer VT-x/AMD-V imbriqué »** et attribuer **2 à 4 processeurs** (jamais tous ceux du PC). Si la case est grisée, depuis un terminal du PC (sous Windows : `cmd`, dans `C:\Program Files\Oracle\VirtualBox`) :
-> ```
-> VBoxManage modifyvm "NomDeLaVM" --nested-hw-virt on
-> ```
->
-> **VMware :** *Settings* → *Processors* → cocher **« Virtualize Intel VT-x/EPT or AMD-V/RVI »**.
+### Vérification des extensions matérielles
 
-
-- Vérifiez la présence des extensions de virtualisation :
+- Vérifiez la présence des extensions de virtualisation dans le processeur exposé à votre instance :
 
 ```bash
 grep -Ec '(vmx|svm)' /proc/cpuinfo
 ```
 
-Le résultat est le nombre de processeurs (cœurs logiques) qui disposent de l'extension. **0** signifie que la virtualisation matérielle n'est pas disponible : vérifier le BIOS du PC, ou l'option de virtualisation imbriquée de la VM.
-
-> [!TIP]
-> **Le résultat est 0 dans une VM VirtualBox ?**
-> 1. Éteignez complètement la VM, puis vérifiez que l'option est bien active : `VBoxManage showvminfo "NomDeLaVM"` doit afficher `Nested VT-x/AMD-V: enabled`.
-> 2. Une **tortue verte** en bas de la fenêtre de la VM signifie que VirtualBox fonctionne au-dessus de Hyper-V : voir l'avertissement ci-dessus.
+Le résultat est le nombre de processeurs (cœurs logiques) qui disposent de l'extension.  **0** signifie que la virtualisation imbriquée n'est pas active sur l'instance EC2 : vérifiez que l'option Nested Virtualization a bien été activée lors de sa création.
 
 - Identifiez le type d'extension :
 
@@ -97,7 +84,7 @@ grep -Eo '(vmx|svm)' /proc/cpuinfo | sort -u
 - `vmx` : processeur **Intel** (VT-x)
 - `svm` : processeur **AMD** (AMD-V)
 
-Vérifiez que les modules KVM existent pour votre noyau :
+- Vérifiez que les modules KVM existent pour votre noyau :
 
 ```bash
 find /lib/modules/$(uname -r) -iname "*kvm*"
@@ -105,8 +92,6 @@ find /lib/modules/$(uname -r) -iname "*kvm*"
 
 Parmi les résultats, seuls trois modules nous intéressent : `kvm` (le cœur de KVM), `kvm-intel` et `kvm-amd` (la partie propre au fabricant du processeur). L'extension `.zst` indique que le module est compressé.
 
-
----
 ## 2. Installation de l'hôte KVM
 
 ```bash
@@ -186,15 +171,19 @@ flowchart LR;
 ```
 
 ---
-
 ## 3. Le réseau des VM
 
 ### 3.1 Le réseau NAT par défaut
 
-
 libvirt crée automatiquement un réseau virtuel nommé `default` : un pont `virbr0` avec un serveur DHCP et du NAT vers l'extérieur.
 
-![Réseau libvirt default](images/reseau-default.png)
+```mermaid
+flowchart LR
+    VM1["VM1<br/>192.168.122.x"] --- BR["Pont virbr0<br/>Passerelle : 192.168.122.1<br/>+ dnsmasq (DHCP/DNS)"]
+    VM2["VM2<br/>192.168.122.y"] --- BR
+    BR -->|"NAT (iptables)"| NIC["Interface EC2 (ens5)<br/>IP privée VPC"] --> EXT["Internet"]
+
+```
 
 - **virbr0** : commutateur virtuel auquel sont branchées les VM ; il sert aussi de passerelle (`192.168.122.1`).
 - **dnsmasq** : distribue les adresses IP aux VM (DHCP) et résout les noms (DNS).
@@ -214,16 +203,15 @@ virsh net-start default
 virsh net-autostart default
 ```
 
- **Question 2.** Quelle plage d'adresses IP le réseau `default` distribue-t-il ? 
+ **Question 1.** Quelle plage d'adresses IP le réseau `default` distribue-t-il ? 
 
 
 ---
+## 4. Les disques virtuels (fichiers images disque)
 
-## 4. Les images disque
+### 4.1 Les formats de disques virtuels
 
-### 4.1 Les formats
-
-QEMU sait manipuler plusieurs formats d'images disque :
+QEMU sait manipuler plusieurs formats de disques virtuels (souvent appelés « images disque » dans le jargon de la virtualisation, par opposition aux images système contenant déjà un OS comme les ISO) :
 
 | Format | Origine | Particularités |
 |---|---|---|
@@ -240,7 +228,7 @@ libvirt range les disques des VM dans des **pools de stockage**. Un pool de type
 virsh pool-list --all
 ```
 
-Créez le pool `default`, qui correspond au répertoire `/var/lib/libvirt/images` :
+- Créez le pool `default`, qui correspond au répertoire `/var/lib/libvirt/images` :
 
 ```bash
 virsh pool-define-as default dir --target /var/lib/libvirt/images
@@ -248,7 +236,7 @@ virsh pool-start default
 virsh pool-autostart default
 ```
 
-Vérifiez :
+- Vérifiez :
 
 ```bash
 virsh pool-list --all
@@ -258,42 +246,43 @@ virsh vol-list default
 
 ### 4.3 Créer et inspecter une image
 
+`qemu-img create` crée un disque virtuel **vierge** (non partitionné et sans système d'exploitation, comme un disque dur neuf). Nous créons dès maintenant le disque de **4 Gio** qui accueillera notre VM Alpine Linux à la section 5 :
+
+> [!NOTE] En production, `virt-install --disk size=4` peut créer ce fichier automatiquement. Nous le créons ici manuellement avant l'installation afin d'observer son allocation dynamique (_thin provisioning_).
+
+
 ```bash
-sudo qemu-img create -f qcow2 /var/lib/libvirt/images/test.qcow2 10G
-sudo qemu-img info /var/lib/libvirt/images/test.qcow2
-ls -lh /var/lib/libvirt/images/test.qcow2
-du -h  /var/lib/libvirt/images/test.qcow2
+sudo qemu-img create -f qcow2 /var/lib/libvirt/images/alpine1.qcow2 4G
+sudo qemu-img info /var/lib/libvirt/images/alpine1.qcow2
+ls -lh /var/lib/libvirt/images/alpine1.qcow2
+du -h  /var/lib/libvirt/images/alpine1.qcow2
 ```
-**Question 3.** Comparez la *virtual size* donnée par `qemu-img info` et la place réellement occupée (`du -h`). Que pouvez-vous en déduire sur le format qcow2 ?
+
+- Actualisez le pool de stockage pour que libvirt indexe ce nouveau volume :
+
+```bash
+virsh pool-refresh default
+virsh vol-list default
+```
+
+**Question 2.** Comparez la *virtual size* donnée par `qemu-img info` et la place réellement occupée (`du -h`). Que pouvez-vous en déduire sur le format qcow2 ?
 
 ---
 ## 5. Créer une VM avec virt-install
 
 Nous installons **Alpine Linux** (édition *virt*) : une distribution très légère, dont l'ISO se télécharge et s'installe en quelques minutes.
 
-### 5.1 Récupérer l'ISO
+### 5.1 Télécharger l'ISO en ligne de commande
 
-Téléchargez l'ISO **x86_64 « Virtual »** depuis https://alpinelinux.org/downloads/ puis placez-la dans le répertoire des ISO :
+Téléchargez directement l'ISO **x86_64 « Virtual »** dans le répertoire `/var/lib/libvirt/boot` :
 
 ```bash
 sudo mkdir -p /var/lib/libvirt/boot
-sudo mv alpine-*-x86_64.iso /var/lib/libvirt/boot/alpine.iso
+ALPINE_ISO=$(curl -s https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/ | grep -oE 'alpine-virt-[0-9.]+-x86_64\.iso' | head -n 1)
+sudo wget -O /var/lib/libvirt/boot/alpine.iso "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/${ALPINE_ISO}"
+ls -lh /var/lib/libvirt/boot/alpine.iso
 ```
-
-### 5.2 Trouver l'identifiant du système invité
-
-`virt-install` adapte le matériel virtuel au système invité. Cherchez l'identifiant correspondant :
-
-```bash
-virt-install --osinfo list | grep -i alpine
-```
-
-### 5.3 Lancer la création
-
-Remplacez `alpinelinux3.21` par la valeur la plus récente trouvée à l'étape 5.2 (en cas de doute : `--osinfo linux2022`).
-
-> [!NOTE]
-> Si la version exacte de votre ISO n'apparaît pas dans `virt-install --osinfo list`, choisissez la version la plus récente proposée : les réglages matériels (VirtIO…) sont identiques.
+### 5.2 Lancer la création de la VM
 
 ```bash
 virt-install \
@@ -301,116 +290,112 @@ virt-install \
   --memory 1024 \
   --vcpus 1 \
   --cpu host-passthrough \
-  --disk size=4,format=qcow2 \
+  --disk path=/var/lib/libvirt/images/alpine1.qcow2,format=qcow2 \
   --cdrom /var/lib/libvirt/boot/alpine.iso \
-  --osinfo alpinelinux3.21 \
+  --osinfo detect=on,require=off \
   --network network=default \
   --graphics none \
   --console pty,target_type=serial
 ```
 
-| Option | Rôle |
+|**Option**|**Rôle**|
 |---|---|
-| `--name` | Nom de la VM (domaine libvirt) |
-| `--memory` | Mémoire en Mio |
-| `--vcpus` | Nombre de processeurs virtuels |
-| `--cpu host-passthrough` | Expose à l'invité le modèle exact du CPU de l'hôte (meilleures performances) |
-| `--disk size=4,format=qcow2` | Crée un disque de 4 Gio dans le pool `default` |
-| `--cdrom` | Média d'installation |
-| `--osinfo` | Système invité (alias : `--os-variant`) |
-| `--network network=default` | Réseau NAT de libvirt (`bridge=br0` pour un pont) |
-| `--graphics none` | Pas d'affichage graphique (sinon `spice` ou `vnc`) |
-| `--console pty,target_type=serial` | Console texte de la VM (port série), affichée dans le terminal |
+|`--name`|Nom de la VM (domaine libvirt)|
+|`--memory`|Mémoire en Mio|
+|`--vcpus`|Nombre de processeurs virtuels|
+|`--cpu host-passthrough`|Expose à l'invité le modèle exact du CPU de l'hôte (meilleures performances)|
+|`--disk path=...,format=qcow2`|Attache le disque virtuel de 4 Gio créé à la section 4.3|
+|`--cdrom`|Média d'installation|
+|`--osinfo detect=on,require=off`|Détecte automatiquement l'OS depuis l'ISO pour activer les pilotes VirtIO|
+|`--network network=default`|Réseau NAT de libvirt (`bridge=br0` pour un pont)|
+|`--graphics none`|Pas d'affichage graphique (sinon `spice` ou `vnc`)|
+|`--console pty,target_type=serial`|Console texte de la VM (port série), affichée dans le terminal|
 
 La console de la VM s'affiche directement dans votre terminal :
 
-- pour la **quitter** sans arrêter la VM : **Ctrl + ]** ;
+- pour la **quitter** sans arrêter la VM : **Ctrl + ]** (sur clavier AZERTY : **Ctrl + AltGr + )** ou **Ctrl + $** ; en dernier recours depuis un second terminal SSH : `pkill -f "virsh console"`) ;
+    
 - pour y **revenir** : `virsh console alpine1` (puis Entrée).
-
-> [!NOTE]
-> Une console série est plus légère et plus fiable qu'une fenêtre graphique, surtout en virtualisation imbriquée. Avec `--graphics spice`, la console s'ouvre dans **virt-viewer** (`virt-viewer alpine1`) ; pour libérer la souris capturée par la VM : **Ctrl + Alt**.
+    
 
 > [!WARNING]
-> Lancez `virt-install` **une seule fois**. Si la commande échoue, supprimez la VM avant de recommencer : `virsh destroy alpine1`, puis `virsh undefine alpine1 --remove-all-storage`.
+> 
+> Lancez `virt-install` **une seule fois**. Si la commande échoue, supprimez la définition de la VM avant de recommencer : `virsh destroy alpine1`, puis `virsh undefine alpine1` (ajoutez `--remove-all-storage` uniquement si vous souhaitez aussi supprimer le disque et le recréer).
 
-### 5.4 Installer Alpine
+### 5.3 Installer Alpine
 
 Dans la console :
 
-1. À l'invite `boot:`, tapez `virt` puis Entrée. Le démarrage peut prendre une à deux minutes en virtualisation imbriquée.
+1. La VM démarre sur l'ISO : si l'invite `boot:` s'affiche, tapez `virt` puis Entrée ; sur un CPU rapide (comme EC2), le démarrage passe directement à `localhost login:`.
+    
 2. Connectez-vous en `root` (pas de mot de passe).
-3. Lancez `setup-alpine` et répondez aux questions : clavier `fr`, réseau `eth0` en `dhcp`, mot de passe root, fuseau horaire, puis disque `vda` en mode `sys`.
+    
+3. Lancez `setup-alpine` et répondez aux questions : clavier `fr` (`fr`), hostname `alpine1`, réseau `eth0` en `dhcp`, mot de passe root, fuseau horaire, valeurs par défaut pour proxy/miroir/SSH, puis disque **`vda`** en mode **`sys`**.
+    
 4. Une fois l'installation terminée : `reboot`. La VM redémarre sur son disque ; connectez-vous en `root` avec le mot de passe choisi.
+    
 
-### 5.5 Vérifier la connectivité
+### 5.4 Vérifier la connectivité
 
-Dans la VM :
+Dans la VM (`alpine1:~#`) :
 
 ```bash
 ip addr
 ping -c 3 192.168.122.1     # passerelle (virbr0)
 ping -c 3 8.8.8.8           # Internet via le NAT
+
 ```
 
-Depuis l'hôte :
+Quittez la console (**Ctrl + ]**) pour revenir sur l'hôte Ubuntu EC2, puis récupérez l'adresse IP de la VM :
 
 ```bash
 virsh domifaddr alpine1
-virsh net-dhcp-leases default
 ```
 
-**Question 4.** Pingez la VM depuis l'hôte. Fonctionne-t-il ? Est-ce qu'une autre machine de la salle pourrait joindre cette VM ? Pourquoi ?
+**Question 3.** Pingez la VM depuis l'hôte EC2. Fonctionne-t-il ? Est-ce qu'une autre instance EC2 (ou votre PC personnel) pourrait joindre directement cette VM ? Pourquoi ?
 
 ---
-
 ## 6. Piloter les VM avec virsh
 
-| Action | Commande |
-|---|---|
-| VM actives | `virsh list` |
-| VM inactives | `virsh list --inactive` |
-| Toutes les VM | `virsh list --all` |
-| Démarrer | `virsh start alpine1` |
-| Arrêt propre (ACPI) | `virsh shutdown alpine1` |
-| Arrêt forcé (« débrancher la prise ») | `virsh destroy alpine1` |
-| Redémarrer | `virsh reboot alpine1` |
-| Mettre en pause / reprendre | `virsh suspend alpine1` / `virsh resume alpine1` |
-| Démarrage automatique avec l'hôte | `virsh autostart alpine1` |
-| Infos sur la VM | `virsh dominfo alpine1` |
-| Disques de la VM | `virsh domblklist alpine1` |
-| Interfaces réseau | `virsh domiflist alpine1` |
-| Infos sur l'hôte | `virsh nodeinfo` |
+| Action                                | Commande                                         |
+| ------------------------------------- | ------------------------------------------------ |
+| VM actives                            | `virsh list`                                     |
+| VM inactives                          | `virsh list --inactive`                          |
+| Toutes les VM                         | `virsh list --all`                               |
+| Démarrer                              | `virsh start alpine1`                            |
+| Arrêt propre (ACPI)                   | `virsh shutdown alpine1`                         |
+| Arrêt forcé (« débrancher la prise ») | `virsh destroy alpine1`                          |
+| Redémarrer                            | `virsh reboot alpine1`                           |
+| Mettre en pause / reprendre           | `virsh suspend alpine1` / `virsh resume alpine1` |
+| Démarrage automatique avec l'hôte     | `virsh autostart alpine1`                        |
+| Infos sur la VM                       | `virsh dominfo alpine1`                          |
+| Disques de la VM                      | `virsh domblklist alpine1`                       |
+| Interfaces réseau                     | `virsh domiflist alpine1`                        |
+| Infos sur l'hôte                      | `virsh nodeinfo`                                 |
 
 > [!NOTE]
 > `virsh destroy` **ne supprime pas** la VM : il la coupe brutalement, comme si on arrachait la prise. Pour supprimer une VM, c'est `virsh undefine`.
 
-**Question 5.** Mettez la VM en pause avec `suspend`, puis observez son état (`virsh list`) et la console. Quelle différence avec un `shutdown` ?
+**Question 4.** Mettez la VM en pause avec `virsh suspend alpine1`, puis observez son état (`virsh list`) et sa console (`virsh console alpine1`, puis **Ctrl + ]**). Quelle différence avec un `shutdown` ? *(Pensez à exécuter `virsh resume alpine1` ensuite.)*
 
 ---
-
 ## 7. La configuration XML
 
 libvirt décrit chaque VM dans un fichier XML (matériel, disques, réseau, périphériques).
 
-Afficher la configuration :
+- Affichez la configuration :
 
 ```bash
 virsh dumpxml alpine1
 ```
 
-La modifier proprement (libvirt valide le XML à l'enregistrement) :
+- Inspectez uniquement les ressources matérielles (mémoire, CPU, disque) :
 
 ```bash
-virsh edit alpine1
+virsh dumpxml alpine1 | grep -E "memory|vcpu|source file"
 ```
 
-> [!NOTE]
-> Ne modifiez jamais directement les fichiers de `/etc/libvirt/qemu/` : libvirt ne relirait pas vos changements. Passez toujours par `virsh edit`. La plupart des changements ne s'appliquent qu'au **prochain démarrage** de la VM.
-
-**Exercice.** VM éteinte, passez la mémoire de `alpine1` à 512 Mio et ajoutez un second vCPU avec `virsh edit` (balises `<memory>`, `<currentMemory>` et `<vcpu>`). Démarrez la VM et vérifiez avec `virsh dominfo`.
-
-> On peut aussi utiliser les commandes dédiées : `virsh setmaxmem`, `virsh setmem`, `virsh setvcpus`.
-
+> [!NOTE] Ne modifiez jamais directement les fichiers de `/etc/libvirt/qemu/` : libvirt ne relirait pas vos changements. Pour modifier une VM existante, on passe par `virsh edit alpine1` (qui valide le XML à l'enregistrement) ou par des commandes dédiées (`virsh setmem`, `virsh setvcpus`). La plupart des changements ne s'appliquent qu'au **prochain démarrage**.
 ---
 
 ## 8. Snapshots
@@ -428,111 +413,74 @@ virsh snapshot-list alpine1
 3. Redémarrez la VM : le fichier existe-t-il encore ?
 4. Supprimez le snapshot : `virsh snapshot-delete alpine1 propre`
 
----
+## 9. Cloner et importer une VM (images cloud)
 
-## 9. Cloner et créer une VM à partir d'un XML
 
-### 9.1 Méthode manuelle : dumpxml + define
+### 9.1 Cloner une VM avec virt-clone
 
-1. Exporter la configuration (VM éteinte) :
-   ```bash
-   virsh shutdown alpine1
-   virsh dumpxml alpine1 > ~/alpine2.xml
-   ```
-2. Copier le disque :
-   ```bash
-   sudo cp /var/lib/libvirt/images/alpine1.qcow2 /var/lib/libvirt/images/alpine2.qcow2
-   ```
-3. Dans `~/alpine2.xml` :
-   - changer `<name>` en `alpine2`
-   - **supprimer** la ligne `<uuid>` (libvirt en générera une)
-   - changer le chemin du disque (`<source file=...>`) vers `alpine2.qcow2`
-   - **supprimer** la ligne `<mac address=.../>` (sinon conflit réseau avec alpine1)
-4. Enregistrer la VM :
-   ```bash
-   virsh define ~/alpine2.xml
-   virsh start alpine2
-   ```
-
-**Question 6.** Quelle est la différence entre `virsh define fichier.xml` et `virsh create fichier.xml` ? (Indice : testez `create`, puis éteignez la VM et regardez `virsh list --all`.)
-
-### 9.2 Méthode automatique : virt-clone
+Plutôt que de réinstaller un système complet, on clone une VM existante (éteinte) :
 
 ```bash
-virt-clone --original alpine1 --name alpine3 --auto-clone
+virsh shutdown alpine1
+virt-clone --original alpine1 --name alpine2 --auto-clone
+
 ```
 
-`virt-clone` fait automatiquement tout le travail de la section 9.1 (nouveau nom, UUID, adresse MAC et copie du disque).
+- `virt-clone` copie automatiquement le disque virtuel et génère un nouveau fichier XML en modifiant les **4 éléments uniques** d'une VM : son nom (`<name>`), son identifiant (`<uuid>`), le chemin de son disque (`<source file=...>`) et l'adresse MAC de sa carte réseau (`<mac address=.../>`, pour éviter tout conflit sur `virbr0`).
+    
+- Vérifiez la différence entre les deux configurations XML :
 
-### 9.3 Importer un disque existant
+```bash
+diff -u <(virsh dumpxml alpine1) <(virsh dumpxml alpine2) | grep -E "^[-+]\s*<(name|uuid|source file|mac address)"
+```
+### 9.2 Importer une image cloud prête à l'emploi
 
-`virt-install --import` crée une VM à partir d'un disque **déjà installé**, sans passer par une ISO ni par une installation. C'est ainsi que fonctionnent les clouds (AWS, OpenStack) : on démarre des VM à partir d'**images prêtes à l'emploi**.
+`virt-install --import` crée une VM à partir d'un disque **déjà installé**, sans ISO ni étape d'installation. C'est le principe utilisé par les clouds (comme AWS EC2 ou OpenStack) à partir d'images préconfigurées.
 
-Exemple avec **CirrOS**, un mini-système Linux conçu pour tester les hyperviseurs et les clouds.
-
-Télécharger et inspecter l'image :
+Téléchargez et inspectez **CirrOS**, un mini-système Linux conçu pour tester les clouds :
 
 ```bash
 wget https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
 qemu-img info cirros-0.6.3-x86_64-disk.img
+sudo mv cirros-0.6.3-x86_64-disk.img /var/lib/libvirt/images/cirros1.qcow2
+
 ```
-
-Copier l'image dans le pool de stockage :
-
-```bash
-sudo cp cirros-0.6.3-x86_64-disk.img /var/lib/libvirt/images/cirros1.qcow2
-```
-
-Créer un petit disque de configuration au format **NoCloud** :
-
-```bash
-sudo apt install -y cloud-image-utils
-echo "instance-id: cirros1" > meta-data
-echo "#cloud-config" > user-data
-cloud-localds seed.iso user-data meta-data
-sudo cp seed.iso /var/lib/libvirt/boot/cirros1-seed.iso
-```
-
-Créer la VM :
+- Démarrez directement la VM à partir de ce disque :
 
 ```bash
 virt-install --import \
   --name cirros1 \
   --memory 256 --vcpus 1 \
   --disk /var/lib/libvirt/images/cirros1.qcow2,format=qcow2 \
-  --disk /var/lib/libvirt/boot/cirros1-seed.iso,device=cdrom \
-  --osinfo linux2022 \
+  --osinfo detect=on,require=off \
   --network network=default \
   --graphics none \
   --console pty,target_type=serial
+
 ```
+> [!NOTE] Au démarrage, CirrOS cherche un **service de métadonnées cloud** (`169.254.169.254` — celui-là même utilisé par votre instance EC2) pour récupérer sa configuration (hostname, clés SSH…). Comme ce service est absent sur notre réseau virtuel local, patientez ~20 secondes jusqu'à l'invite `login:`. Connexion : utilisateur `cirros`, mot de passe `gocubsgo`. Pour quitter la console : **Ctrl + ]**.
+## 10. virt-manager et QEMU sans libvirt
 
-Connexion : utilisateur `cirros`, mot de passe `gocubsgo`. Pour quitter la console : **Ctrl + ]**.
+**virt-manager** fournit une interface graphique au-dessus de libvirt : création de VM, console, statistiques CPU/RAM en temps réel, snapshots et migration entre hôtes.
 
-> [!NOTE]
-> **Pourquoi ce disque `seed.iso` ?** Au démarrage, une image cloud cherche sa configuration (nom d'hôte, clés SSH…) auprès d'une **source de données** : en général le **service de métadonnées** du cloud (`169.254.169.254`), absent ici. CirrOS (via son outil `cirros-init`, équivalent léger de **cloud-init**) cherche d'abord une source locale au format **NoCloud** : le disque `seed.iso`. Sans lui, il ferait 20 tentatives réseau avant d'afficher `login:`.
+### 10.1. Afficher virt-manager avec MobaXterm
 
-**Question 7.**
-a) Quel est le format de l'image téléchargée d'après `qemu-img info` ? Quelle est sa taille virtuelle et sa taille réelle ?
-b) Pourquoi n'a-t-on eu besoin ni de `--cdrom` ni d'installation ?
-c) Quel est le rôle du service de métadonnées dans un cloud ?
-
-### 9.4 Supprimer une VM
+1. Ouvrez **MobaXterm** et créez une session SSH vers votre instance EC2 (**Session → SSH**, adresse IP publique de l'instance, utilisateur `ubuntu`, puis onglet **Advanced SSH settings → Use private key** pour sélectionner votre fichier `.pem`).
+2. Vérifiez en haut à droite de la fenêtre MobaXterm que l'icône **X server** est active (le transfert X11 est activé par défaut). *(Sous macOS/Linux, connectez-vous depuis un terminal avec `ssh -Y -i votre-cle.pem ubuntu@<IP_EC2>`.)*
+3. Lancez `virt-manager` en arrière-plan depuis l'instance EC2 :
 
 ```bash
-virsh destroy alpine3                              # si elle tourne
-virsh undefine alpine3 --remove-all-storage       # supprime la VM ET son disque
+virt-manager &
 ```
 
----
+4. Agrandissez la fenêtre qui s'ouvre sur votre écran Windows et **double-cliquez sur `QEMU/KVM`** pour déplier la liste des VM (`alpine1`, `alpine2`, `cirros1`). Double-cliquez sur une VM pour afficher sa console graphique et ses courbes CPU/mémoire.
+    
 
-## 10. (Aller plus loin) virt-manager et QEMU sans libvirt
+**Question 5.** Les VM créées en ligne de commande apparaissent-elles dans `virt-manager` ? Qu'est-ce que cela montre sur le rôle de `libvirt` ?
 
-**virt-manager** fournit une interface graphique au-dessus de libvirt : création de VM, console, statistiques, snapshots, migration entre hôtes. Lancez `virt-manager` et retrouvez-y les VM créées en ligne de commande.
+### 10.2. QEMU sans libvirt
 
-**Question 8.** Les VM créées avec `virsh` apparaissent-elles dans virt-manager ? Qu'est-ce que cela montre sur le rôle de libvirt ?
-
-**QEMU sans libvirt.** On peut lancer QEMU directement. La VM n'est alors pas connue de libvirt. Créez un disque de test personnel, puis démarrez QEMU sur l'ISO Alpine :
+On peut lancer QEMU directement sans passer par `libvirt`. Créez un disque de test personnel, puis démarrez QEMU sur l'ISO Alpine :
 
 ```bash
 qemu-img create -f qcow2 ~/qemu-test.qcow2 2G
@@ -543,28 +491,12 @@ qemu-system-x86_64 -enable-kvm -m 512 \
   -nographic
 ```
 
-À l'invite `boot:`, tapez `virt`. Pour quitter QEMU : **Ctrl + A**, puis **X**.
+Si l'invite `boot:` s'affiche, tapez `virt`. Pour quitter QEMU : **Ctrl + A**, puis **X**.
 
-Dans un **second terminal**, pendant que la VM tourne :
+Dans un **second onglet SSH MobaXterm** sur l'instance EC2, pendant que cette VM tourne :
 
 ```bash
 virsh list --all
 ps aux | grep qemu-system
 ```
-
-**Question 9.** La VM lancée avec QEMU apparaît-elle dans `virsh list --all` ? Quels avantages libvirt apporte-t-il par rapport à QEMU seul ?
-
----
-
-## Récapitulatif des commandes
-
-| Thème | Commandes |
-|---|---|
-| Vérification de l'hôte | `grep -Ec '(vmx\|svm)' /proc/cpuinfo`, `kvm-ok`, `virt-host-validate` |
-| Réseaux | `virsh net-list`, `net-start`, `net-autostart`, `net-dhcp-leases` |
-| Stockage | `virsh pool-list`, `vol-list`, `qemu-img create / info / convert` |
-| Création | `virt-install`, `virsh define`, `virsh create`, `virt-clone` |
-| Cycle de vie | `start`, `shutdown`, `destroy`, `reboot`, `suspend`, `resume`, `autostart` |
-| Configuration | `dumpxml`, `edit`, `dominfo`, `domifaddr` |
-| Snapshots | `snapshot-create-as`, `snapshot-list`, `snapshot-revert`, `snapshot-delete` |
-| Suppression | `undefine --remove-all-storage` |
+**Question 6.** La VM lancée avec QEMU seul apparaît-elle dans `virsh list --all` (ou dans `virt-manager`) ? Quels avantages `libvirt` apporte-t-il par rapport à QEMU seul ?
